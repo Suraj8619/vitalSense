@@ -1,0 +1,44 @@
+# One compose file, two services. That is the whole infrastructure.
+#
+# The plan's own risk register warns about scope creep here, and D-06 already argued the
+# case: right-sizing infrastructure is the point, not a limitation. There is no message
+# broker because one device does not need a fleet's delivery guarantees, and no
+# orchestrator because there is one process. Device-side buffering covers outages
+# (SR-05), which is where the durability requirement actually lives.
+#
+#   docker compose up -d db      # database only; run the server from source
+#   docker compose up            # both
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vitalsense
+      POSTGRES_PASSWORD: vitalsense
+      POSTGRES_DB: vitalsense
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The server waits for this rather than for a fixed sleep: a race at start-up that
+      # only shows up on a slow machine is the kind of bug that appears during a demo.
+      test: ["CMD-SHELL", "pg_isready -U vitalsense -d vitalsense"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  server:
+    build: ./server
+    environment:
+      DATABASE_URL: postgres://vitalsense:vitalsense@db:5432/vitalsense
+      HOST: 0.0.0.0
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
