@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VitalSense Monitor</title>
+    <style>
+      /*
+       * Bedside-monitor conventions are followed deliberately, because they are not
+       * arbitrary: dark background so the display does not light a ward at night,
+       * green ECG trace, and the colour coding clinicians already read without
+       * thinking - cyan for SpO2, yellow for temperature, red for high-priority
+       * alarms.
+       */
+      :root {
+        --bg: #0a0e13;
+        --panel: #141a22;
+        --line: #232c38;
+        --text: #e6edf3;
+        --muted: #8b98a8;
+        --ecg: #35d07f;
+        --spo2: #35c8e8;
+        --temp: #e8c135;
+        --alarm-high: #ff4d4f;
+        --alarm-medium: #ffa940;
+        --alarm-low: #8b98a8;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        flex-shrink: 0;
+      }
+      .brand { font-weight: 700; letter-spacing: 0.08em; }
+      .spacer { flex: 1; }
+      .pill {
+        padding: 3px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .pill.live { color: var(--ecg); border-color: var(--ecg); }
+      .pill.down { color: var(--alarm-high); border-color: var(--alarm-high); }
+      select {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 4px 8px;
+        font: inherit;
+      }
+
+      /* Alarm banner: the one element allowed to dominate the screen. */
+      #alarms { flex-shrink: 0; }
+      .alarm {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 16px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        border-bottom: 1px solid rgba(0, 0, 0, 0.3);
+      }
+      .alarm.high { background: var(--alarm-high); color: #fff; animation: flash 1s steps(1) infinite; }
+      .alarm.medium { background: var(--alarm-medium); color: #1a1000; }
+      .alarm.low { background: var(--panel); color: var(--alarm-low); border-bottom-color: var(--line); }
+      .alarm .age { margin-left: auto; font-weight: 400; opacity: 0.85; }
+      @keyframes flash { 50% { filter: brightness(0.65); } }
+      @media (prefers-reduced-motion: reduce) { .alarm.high { animation: none; } }
+
+      main { flex: 1; display: flex; min-height: 0; }
+      #waveform-wrap { flex: 1; position: relative; min-width: 0; }
+      canvas { display: block; width: 100%; height: 100%; }
+      #wave-label {
+        position: absolute;
+        top: 8px;
+        left: 12px;
+        color: var(--ecg);
+        font-size: 12px;
+        letter-spacing: 0.1em;
+      }
+      #quality-flag {
+        position: absolute;
+        top: 8px;
+        right: 12px;
+        font-size: 12px;
+        padding: 2px 8px;
+        border-radius: 3px;
+      }
+      .q-good { color: var(--ecg); }
+      .q-poor { color: var(--alarm-medium); }
+      .q-unusable { color: var(--alarm-high); background: rgba(255, 77, 79, 0.12); }
+
+      aside {
+        width: 220px;
+        flex-shrink: 0;
+        border-left: 1px solid var(--line);
+        background: var(--panel);
+        display: flex;
+        flex-direction: column;
+      }
+      .tile { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+      .tile .label { color: var(--muted); font-size: 11px; letter-spacing: 0.12em; }
+      .tile .value { font-size: 44px; font-weight: 700; line-height: 1.05; font-variant-numeric: tabular-nums; }
+      .tile .unit { font-size: 13px; color: var(--muted); margin-left: 4px; }
+      .tile .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+      #hr .value { color: var(--ecg); }
+      #hr.abnormal .value { color: var(--alarm-medium); }
+      #spo2 .value { color: var(--spo2); }
+      #temp .value { color: var(--temp); }
+      /* An unknown value is shown as "--", never as a stale number. */
+      .value.unknown { color: var(--muted) !important; }
+
+      #stats { margin-top: auto; padding: 12px 16px; color: var(--muted); font-size: 11px; }
+      #stats div { display: flex; justify-content: space-between; padding: 1px 0; }
+      #stats .warn { color: var(--alarm-medium); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="brand">VITALSENSE</span>
+      <select id="device-select" aria-label="Device"><option>no devices</option></select>
+      <span class="spacer"></span>
+      <a class="pill" href="/central.html" style="text-decoration:none">central station →</a>
+      <span class="pill" id="conn">connecting…</span>
+    </header>
+
+    <div id="alarms"></div>
+
+    <main>
+      <div id="waveform-wrap">
+        <canvas id="wave"></canvas>
+        <div id="wave-label">ECG · Lead II · 25 mm/s</div>
+        <div id="quality-flag"></div>
+      </div>
+
+      <aside>
+        <div class="tile" id="hr">
+          <div class="label">HR</div>
+          <div class="value unknown">--<span class="unit">bpm</span></div>
+          <div class="sub" id="hr-sub">waiting for signal</div>
+        </div>
+        <div class="tile" id="spo2">
+          <div class="label">SpO₂</div>
+          <div class="value unknown">--<span class="unit">%</span></div>
+          <div class="sub" id="spo2-sub">waiting for signal</div>
+        </div>
+        <div class="tile" id="temp">
+          <div class="label">TEMP</div>
+          <div class="value unknown">--<span class="unit">°C</span></div>
+        </div>
+        <div id="stats">
+          <div><span>frames</span><span id="s-frames">0</span></div>
+          <div><span>dropped</span><span id="s-dropped">0</span></div>
+          <div><span>beats</span><span id="s-beats">0</span></div>
+          <div><span>uptime</span><span id="s-uptime">0s</span></div>
+        </div>
+      </aside>
+    </main>
+
+    <script type="module">
+      /**
+       * Dashboard client.
+       *
+       * Holds a few seconds of waveform in a ring buffer addressed by absolute
+       * sample index - the same addressing the server uses - so a beat marker that
+       * arrives after the samples carrying its R peak still lands in the right
+       * place. Detection legitimately lags the waveform by more than one frame.
+       */
+
+      const WINDOW_S = 6; // seconds of ECG on screen
+      const STALE_MS = 3000; // no frames for this long => the numbers are not current
+
+      const el = (id) => document.getElementById(id);
+      const state = {
+        fs: 360,
+        devices: new Map(), // deviceId -> latest vitals frame
+        selected: null,
+        lastFrameAt: 0,
+      };
+
+      // --- waveform ring buffer ---------------------------------------------------
+      class Waveform {
+        constructor(capacity) {
+          this.capacity = capacity;
+          this.data = new Float32Array(capacity).fill(NaN);
+          this.latest = -1; // highest absolute index written
+        }
+        reset() {
+          this.data.fill(NaN);
+          this.latest = -1;
+        }
+        write(startIndex, samples) {
+          // A gap means frames were lost. Leave it as NaN so the trace visibly
+          // breaks rather than drawing a straight line across missing data.
+          if (this.latest >= 0 && startIndex > this.latest + 1) {
+            for (let i = this.latest + 1; i < startIndex && i < startIndex + this.capacity; i += 1) {
+              this.data[i % this.capacity] = NaN;
+            }
+          }
+          for (let k = 0; k < samples.length; k += 1) {
+            this.data[(startIndex + k) % this.capacity] = samples[k];
+          }
+          this.latest = Math.max(this.latest, startIndex + samples.length - 1);
+        }
+        at(index) {
+          if (index < 0 || index > this.latest || index <= this.latest - this.capacity) return NaN;
+          return this.data[index % this.capacity];
+        }
+      }
+
+      let wave = new Waveform(Math.round(WINDOW_S * state.fs) + state.fs);
+      let beatMarks = []; // absolute sample indices
+
+      // --- canvas -----------------------------------------------------------------
+      const canvas = el('wave');
+      const ctx = canvas.getContext('2d');
+      let dpr = 1;
+
+      function resize() {
+        dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = Math.round(rect.width * dpr);
+        canvas.height = Math.round(rect.height * dpr);
+      }
+      window.addEventListener('resize', resize);
+
+      function drawGrid(w, h) {
+        // ECG paper: 1 mm minor / 5 mm major. At the conventional 25 mm/s, a major
+        // square is 200 ms - the spacing clinicians use to read rate off a strip.
+        const pxPerSecond = w / WINDOW_S;
+        const major = pxPerSecond * 0.2;
+        const minor = major / 5;
+
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(53, 208, 127, 0.06)';
+        ctx.beginPath();
+        for (let x = w % minor; x < w; x += minor) {
+          ctx.moveTo(Math.round(x) + 0.5, 0);
+          ctx.lineTo(Math.round(x) + 0.5, h);
+        }
+        for (let y = h / 2; y < h; y += minor) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+        for (let y = h / 2; y > 0; y -= minor) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(53, 208, 127, 0.14)';
+        ctx.beginPath();
+        for (let x = w % major; x < w; x += major) {
+          ctx.moveTo(Math.round(x) + 0.5, 0);
+          ctx.lineTo(Math.round(x) + 0.5, h);
+        }
+        for (let y = h / 2; y < h; y += major) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+        for (let y = h / 2; y > 0; y -= major) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+        ctx.stroke();
+      }
+
+      function render() {
+        requestAnimationFrame(render);
+        const w = canvas.width;
+        const h = canvas.height;
+        if (!w || !h) return;
+
+        ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg');
+        ctx.fillRect(0, 0, w, h);
+        drawGrid(w, h);
+
+        if (wave.latest < 0) return;
+
+        const windowSamples = Math.round(WINDOW_S * state.fs);
+        const start = Math.max(0, wave.latest - windowSamples + 1);
+        const xOf = (i) => ((i - start) / windowSamples) * w;
+
+        // Fixed 2 mV full-scale, so beat amplitude is comparable over time rather
+        // than autoscaling to whatever noise is present.
+        const mvPerHalfHeight = 1.5;
+        const yOf = (mv) => h / 2 - (mv / mvPerHalfHeight) * (h / 2);
+
+        // Beat markers first, so the trace draws over them.
+        ctx.fillStyle = 'rgba(53, 208, 127, 0.8)';
+        for (const b of beatMarks) {
+          if (b < start) continue;
+          const x = Math.round(xOf(b));
+          // A downward caret at the top of the trace for each detected beat - the
+          // convention bedside monitors use, and it makes detection visible so a
+          // missed or spurious beat can be seen rather than only inferred from the
+          // rate.
+          ctx.beginPath();
+          ctx.moveTo(x - 5 * dpr, 2 * dpr);
+          ctx.lineTo(x + 5 * dpr, 2 * dpr);
+          ctx.lineTo(x, 11 * dpr);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--ecg');
+        ctx.lineWidth = 1.6 * dpr;
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        let pen = false;
+        for (let i = start; i <= wave.latest; i += 1) {
+          const v = wave.at(i);
+          if (Number.isNaN(v)) { pen = false; continue; } // break the line across gaps
+          const x = xOf(i);
+          const y = yOf(v);
+          if (!pen) { ctx.moveTo(x, y); pen = true; } else { ctx.lineTo(x, y); }
+        }
+        ctx.stroke();
+      }
+
+      // --- vitals rendering -------------------------------------------------------
+      function setValue(tileId, value, digits = 0) {
+        const node = el(tileId).querySelector('.value');
+        const unit = node.querySelector('.unit').outerHTML;
+        if (value === null || value === undefined) {
+          node.classList.add('unknown');
+          node.innerHTML = `--${unit}`;
+        } else {
+          node.classList.remove('unknown');
+          node.innerHTML = `${value.toFixed(digits)}${unit}`;
+        }
+      }
+
+      function renderVitals(v, stale) {
+        // Stale data is shown as unknown rather than as the last number received:
+        // a number on a monitor is a claim about *now*.
+        const fresh = !stale;
+        setValue('hr', fresh ? v.hr : null, 0);
+        setValue('spo2', fresh ? v.spo2 : null, 0);
+        setValue('temp', fresh ? v.temp : null, 1);
+
+        el('hr').classList.toggle('abnormal', fresh && v.hrClass !== 'normal' && v.hr !== null);
+        el('hr-sub').textContent = stale ? 'no recent data' : v.hrClass ?? '';
+
+        // Where the saturation came from, shown rather than implied. A number the
+        // server derived from raw red/IR light is different evidence from one a sensor
+        // module reported about itself, and the perfusion index says how much
+        // pulsatile signal there was to work with.
+        if (stale || v.spo2 === null) {
+          el('spo2-sub').textContent = stale ? 'no recent data' : 'no reading';
+        } else {
+          const parts = [];
+          if (v.spo2Source === 'server') parts.push('derived from red/IR');
+          else if (v.spo2Source === 'device') parts.push('reported by sensor');
+          if (v.perfusionPct !== null && v.perfusionPct !== undefined) parts.push(`PI ${v.perfusionPct.toFixed(1)} %`);
+          if (v.pulseBpm !== null && v.pulseBpm !== undefined) parts.push(`pulse ${v.pulseBpm.toFixed(0)}`);
+          if (v.spo2Quality && v.spo2Quality !== 'good') parts.push(v.spo2Quality);
+          el('spo2-sub').textContent = parts.join(' · ');
+        }
+
+        const q = el('quality-flag');
+        q.textContent = stale ? 'NO DATA' : `SIGNAL ${v.signalQuality.toUpperCase()}`;
+        q.className = stale ? 'q-unusable' : `q-${v.signalQuality}`;
+
+        el('s-frames').textContent = v.stats?.framesReceived ?? 0;
+        const dropped = v.stats?.framesDropped ?? 0;
+        el('s-dropped').textContent = dropped;
+        el('s-dropped').className = dropped > 0 ? 'warn' : '';
+        el('s-beats').textContent = v.stats?.beatsDetected ?? 0;
+        el('s-uptime').textContent = `${Math.round(v.stats?.uptimeS ?? 0)}s`;
+
+        const banner = el('alarms');
+        banner.innerHTML = '';
+        for (const a of v.alarms ?? []) {
+          const div = document.createElement('div');
+          div.className = `alarm ${a.severity}`;
+          const age = Math.max(0, Math.round((Date.now() - a.since) / 1000));
+          div.innerHTML = `<span>${a.code.replace(/_/g, ' ')}</span><span>${a.message}</span><span class="age">${age}s</span>`;
+          banner.appendChild(div);
+        }
+      }
+
+      // --- connection -------------------------------------------------------------
+      function connect() {
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const ws = new WebSocket(`${proto}://${location.host}/stream`);
+
+        ws.onopen = () => {
+          el('conn').textContent = 'live';
+          el('conn').className = 'pill live';
+        };
+
+        ws.onmessage = (ev) => {
+          const m = JSON.parse(ev.data);
+          if (m.type === 'hello') {
+            state.fs = m.fs;
+            wave = new Waveform(Math.round(WINDOW_S * state.fs) + state.fs);
+            return;
+          }
+          if (m.type !== 'vitals') return;
+
+          const isNew = !state.devices.has(m.deviceId);
+          state.devices.set(m.deviceId, m);
+          if (isNew) refreshDeviceList();
+          if (state.selected === null) selectDevice(m.deviceId);
+          if (m.deviceId !== state.selected) return;
+
+          state.lastFrameAt = Date.now();
+          if (m.ecg.length) wave.write(m.sampleIndex, m.ecg);
+          if (m.beats?.length) {
+            beatMarks.push(...m.beats);
+            const cutoff = wave.latest - Math.round(WINDOW_S * state.fs) - state.fs;
+            beatMarks = beatMarks.filter((b) => b > cutoff);
+          }
+          renderVitals(m, false);
+        };
+
+        const down = () => {
+          el('conn').textContent = 'disconnected';
+          el('conn').className = 'pill down';
+          // Retry rather than requiring a page reload - the dashboard should recover
+          // by itself when the server comes back.
+          setTimeout(connect, 2000);
+        };
+        ws.onclose = down;
+        ws.onerror = () => ws.close();
+      }
+
+      function refreshDeviceList() {
+        const select = el('device-select');
+        select.innerHTML = '';
+        for (const id of state.devices.keys()) {
+          const opt = document.createElement('option');
+          opt.value = id;
+          opt.textContent = id;
+          select.appendChild(opt);
+        }
+        if (state.selected) select.value = state.selected;
+      }
+
+      function selectDevice(id) {
+        state.selected = id;
+        wave.reset();
+        beatMarks = [];
+        refreshDeviceList();
+      }
+
+      el('device-select').addEventListener('change', (e) => selectDevice(e.target.value));
+
+      // Staleness watchdog: if frames stop arriving, the displayed numbers stop
+      // being claims about the present and must be withdrawn.
+      setInterval(() => {
+        const v = state.devices.get(state.selected);
+        if (v) renderVitals(v, Date.now() - state.lastFrameAt > STALE_MS);
+      }, 500);
+
+      resize();
+      render();
+      connect();
+    </script>
+  </body>
+</html>
