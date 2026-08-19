@@ -1,0 +1,191 @@
+# CI for VitalSense.
+#
+# The jobs are split by what they need, not by what they are: anything that runs without
+# the datasets runs on every push in under two minutes, and the slow jobs that need
+# PhysioNet recordings or real elapsed time run alongside rather than blocking the fast
+# signal.
+#
+# The job worth explaining is `generated`. Three languages filter the same ECG, and the
+# only thing keeping them consistent is that their coefficients come from one design
+# (D-12). That guarantee is worth nothing if someone edits a generated file by hand, so
+# CI regenerates every one of them and fails on any diff. It is the cheapest job here and
+# the one protecting the most.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.13"
+  NODE_VERSION: "22"
+
+jobs:
+  dsp:
+    name: Python DSP self-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r dsp/requirements.txt
+      - name: Filter design
+        run: python dsp/filters.py
+      - name: Synthetic ECG
+        run: python dsp/synth.py
+      - name: QRS detection
+        run: python dsp/pan_tompkins.py
+      - name: Vitals and alarm thresholds
+        run: python dsp/vitals.py
+      - name: Pulse oximetry
+        run: python dsp/ppg.py
+      - name: Signal quality
+        run: python dsp/quality.py
+      - name: Acquisition chain model
+        run: python sim/afe_model.py
+
+  server:
+    name: Server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - run: npm test
+        working-directory: server
+
+  firmware:
+    name: Firmware host build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - name: Unit tests (portable C core)
+        run: make -C firmware/test test
+      - name: Generated headers compile standalone
+        # A generated header that does not compile is found here rather than during
+        # bring-up, which is the entire reason session 002 started compiling them.
+        run: |
+          for header in firmware/src/notch_coeffs.h firmware/src/vs_calibration.h; do
+            echo "#include \"$(basename "$header")\"" > /tmp/probe.c
+            echo "int main(void){return 0;}" >> /tmp/probe.c
+            cc -std=c99 -Wall -Wextra -Werror -I firmware/src /tmp/probe.c -o /tmp/probe
+          done
+      - name: Firmware frames satisfy the server's own validator
+        run: node firmware/test/validate_frames.mjs
+
+  generated:
+    name: Generated files are up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r dsp/requirements.txt
+      - name: Regenerate coefficients and requirements
+        run: |
+          python dsp/export_coefficients.py
+          python dsp/generate_requirements.py
+      - name: Fail if anything was hand-edited
+        run: |
+          if ! git diff --exit-code -- firmware/src/notch_coeffs.h firmware/src/vs_calibration.h \
+                                        server/src/dsp/coefficients.js docs/requirements.md; then
+            echo "::error::A generated file differs from what its generator produces."
+            echo "Edit the generator, not the output: dsp/export_coefficients.py or dsp/requirements.py"
+            exit 1
+          fi
+
+  validation:
+    name: MIT-BIH validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: pip install -r dsp/requirements.txt
+      - run: npm ci
+        working-directory: server
+      - name: Cache PhysioNet recordings
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: physionet-mitdb-bidmc-v1
+      - name: Fetch recordings
+        run: |
+          python dsp/fetch_data.py
+          python dsp/fetch_ppg.py
+      - name: ECG pipeline vs cardiologist annotations
+        # Exits non-zero when a requirement fails, so this gates the build (D-11).
+        run: python dsp/validate.py
+      - name: PPG pulse detection vs BIDMC
+        run: python dsp/validate_ppg.py
+      - name: Streaming JS port vs the Python design
+        run: npm run validate:streaming
+        working-directory: server
+      - name: Firmware fixed-point notch vs the Python design
+        run: python firmware/test/score_notch.py
+      - name: SpO2 JS port vs the Python design
+        run: |
+          python dsp/export_ppg_fixture.py
+          npm run validate:ppg --prefix server
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification-report
+          path: |
+            docs/verification.md
+            docs/validation_results.json
+
+  scenarios:
+    name: Fault-injection matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: pip install -r dsp/requirements.txt
+      - run: npm ci
+        working-directory: server
+      - name: Run every scenario against the real server
+        # Real time by necessity: a debounce measured in wall-clock seconds cannot be
+        # measured faster (D-46).
+        run: python sim/run_scenarios.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scenario-results
+          path: docs/scenario_results.json
