@@ -1,0 +1,41 @@
+# data (downloaded via dsp/fetch_data.py, never committed)
+data/
+*.dat
+*.hea
+*.atr
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# node
+node_modules/
+.next/
+dist/
+.env
+.env.local
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
+
+# build artifacts
+firmware/.pio/
+*.log
+data/fixtures/
+
+# host build of the firmware core
+firmware/test/build/
+
+# firmware secrets (template is committed as vs_secrets.example.h)
+firmware/include/vs_secrets.h
+firmware/.pio/
+
+# BIDMC PPG records (downloaded via dsp/fetch_ppg.py)
+data/bidmc/
+
+# database volume
+pgdata/
