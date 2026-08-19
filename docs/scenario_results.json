@@ -1,0 +1,105 @@
+{
+  "generated": "2026-08-19 12:24 UTC",
+  "environment": "Python 3.13.7 on Darwin arm64",
+  "results": [
+    {
+      "name": "End-to-end latency",
+      "requirement": "SR-02",
+      "question": "How long does a sample take to reach the display?",
+      "measured": "median 1.4 ms, p95 2.5 ms, worst 13.7 ms",
+      "passed": true,
+      "detail": "Loopback transport: this covers framing, validation, streaming DSP, alarm evaluation and fan-out, but **not** WiFi. A real 2.4 GHz link on a busy ward adds roughly 10-50 ms typical with occasional retransmission spikes into the hundreds, so the deployed figure is this plus that term.",
+      "numbers": {
+        "p50_ms": 1.3867910020053387,
+        "p95_ms": 2.492208033800125,
+        "worst_ms": 13.731000013649464,
+        "n": 281
+      }
+    },
+    {
+      "name": "Leads-off alarm",
+      "requirement": "SR-03",
+      "question": "How fast is a detached electrode alarmed?",
+      "measured": "1.51 s",
+      "passed": true,
+      "detail": "Budget: 1.5 s device+server debounce (D-18, D-28) leaves 500 ms for transport and processing.",
+      "numbers": {
+        "seconds": 1.5118283330230042
+      }
+    },
+    {
+      "name": "30 s network outage",
+      "requirement": "SR-05",
+      "question": "Does a network outage lose patient data?",
+      "measured": "787/787 frames delivered, 0 gaps in seq",
+      "passed": true,
+      "detail": "The device buffers during the outage and replays on reconnect; `seq` gaps are what makes any loss detectable rather than invisible (D-15).",
+      "numbers": {
+        "expected": 787,
+        "received": 787,
+        "dropped": 0
+      }
+    },
+    {
+      "name": "SpO2 from raw light",
+      "requirement": "SR-06",
+      "question": "Is saturation recovered from red/IR?",
+      "measured": "94.0 % against a true 94 % (error 0.0)",
+      "passed": true,
+      "detail": "The device sends light; the server derives saturation (protocol v2). The measurement chain is verified here; the R-to-percentage calibration curve is an assumption (D-34).",
+      "numbers": {
+        "truth": 94.0,
+        "measured": 94,
+        "error": 0.0
+      }
+    },
+    {
+      "name": "Unusable signal",
+      "requirement": "SR-07",
+      "question": "Is a bad signal flagged rather than guessed at?",
+      "measured": "102/102 frames withheld a rate; 0 wrong rates reported",
+      "passed": true,
+      "detail": "The test is not whether the detector copes with noise - it is whether the monitor declines to answer instead of answering wrongly.",
+      "numbers": {
+        "withheld": 102,
+        "of": 102,
+        "wrong": 0
+      }
+    },
+    {
+      "name": "Electrode reconnection",
+      "requirement": "D-22",
+      "question": "Does reattaching an electrode invent a heart rate?",
+      "measured": "0 fabricated rates above 110 bpm; settled at 72 bpm",
+      "passed": true,
+      "detail": "The failure this guards: a burst of detections from the reconnection transient was once displayed as 190 bpm tachycardia with signal quality GOOD.",
+      "numbers": {
+        "fabricated": 0,
+        "settled_bpm": 72.0
+      }
+    },
+    {
+      "name": "Alarm acknowledgement",
+      "requirement": "D-44",
+      "question": "Does acknowledging silence an alarm without hiding it?",
+      "measured": "234 frames silenced; alarm still listed: True",
+      "passed": true,
+      "detail": "Acknowledging is a silence, not a dismissal: the alarm stays on the display and sounds again when the silence expires.",
+      "numbers": {
+        "silenced_frames": 234,
+        "still_listed": true
+      }
+    },
+    {
+      "name": "Silent device",
+      "requirement": "UN-3",
+      "question": "Is a device that stops sending noticed?",
+      "measured": "alarmed after 5.0 s; rate withdrawn: True",
+      "passed": true,
+      "detail": "A monitor that keeps showing the last number it received is claiming something about now that it cannot support (D-23).",
+      "numbers": {
+        "seconds": 4.996235499973409
+      }
+    }
+  ]
+}
